@@ -19,7 +19,7 @@ Traditional pastoralism has long shaped Southern European ecosystems, but widesp
           
   - *GLMM_dataset.csv* - Dataset used for the Generalized Linear Mixed Model (GLMM) analysis.
  
-- *Figures_main.zip* - Contains all figures of the main document:
+- *Figures.zip* - Contains all figures of the main document:
   - *Figure_1_Peneda_map.png* - Study Location and Sampling Design.
   - *Figure_2_Summer_Winter.png* - Summer and Winter activity patterns per species
   - *Figure_3_Cattle.png* - Activity patterns per wild species depending on cattle abundance and season. 
