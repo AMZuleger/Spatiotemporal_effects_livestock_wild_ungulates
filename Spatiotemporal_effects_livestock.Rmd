@@ -1,0 +1,1110 @@
+---
+title: "From Summer Facilitation to Winter Avoidance: Seasonal Shifts in Livestock-Wild Ungulate Temporal Coexistence"
+author: "Annika Zuleger"
+output:
+  html_document:
+    df_print: paged
+---
+
+#### Skript to run analysis to assess spatiotemporal effects of livestock (cattle and horses) on wild ungulates (roe deer and wild boar)
+
+## Load required packages
+
+```{r, message=FALSE , results='hide', warning=FALSE}
+# For activity pattern analysis
+library(activity)
+library(overlap)
+library(suncalc)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+
+# For GLMM spatiotemporal analysis
+library(lme4)
+library(effects)
+library(DHARMa)
+library(car)
+library(emmeans)
+library(dplyr)
+```
+
+### Activity pattern and overlap analysis
+
+## Load data
+
+```{r}
+
+setwd("H:/Data_activity_analysis")
+
+all_occ <- read.csv("CT_Peneda_data_new.csv",header=T,sep=";") # Read dataset
+all_occ$deploymentStart <- as.Date(all_occ$deploymentStart, format = "%d.%m.%Y")
+all_occ$deploymentEnd <- as.Date(all_occ$deploymentEnd, format = "%d.%m.%Y")
+all_occ$eventStartTime <- strptime(all_occ$eventStartTime, format = "%H:%M:%S")
+
+# Calculate sampling effort (camera trap days per location)
+for (i in 1:nrow(all_occ)) {
+  if(year(all_occ$deploymentStart)[i] == year(all_occ$deploymentEnd)[i]){
+    all_occ$sampleSizeValue[i] <- as.numeric((all_occ$deploymentEnd[i]+1) - all_occ$deploymentStart[i])
+  } else {
+    all_occ$sampleSizeValue[i] <- as.numeric((all_occ$deploymentEnd[i] + 365) - all_occ$deploymentStart[i])
+  }
+}
+
+# Calculate observation frequencies and encounter rates for cattle and horses
+freq_er_summary <- all_occ %>%
+  group_by(locationID, sampleSizeValue) %>%
+  summarise(
+    Cattle_freq = sum(scientificName == "Bos taurus", na.rm = TRUE),
+    Horse_freq = sum(scientificName == "Equus caballus", na.rm = TRUE),
+    Deer_freq = sum(scientificName == "Capreolus capreolus", na.rm = TRUE),
+    Boar_freq = sum(scientificName == "Sus scrofa", na.rm = TRUE),
+    Dog_freq = sum(scientificName == "Canis lupus familiaris", na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Cattle_er = Cattle_freq / sampleSizeValue,
+    Horse_er = Horse_freq / sampleSizeValue,
+    Deer_er = Deer_freq / sampleSizeValue,
+    Boar_er = Boar_freq / sampleSizeValue,
+    Dog_er = Dog_freq / sampleSizeValue
+  )
+
+print(freq_er_summary)
+
+all_occ <- merge(all_occ,freq_er_summary, by = c("locationID", "sampleSizeValue"), all.x = T)
+
+# Summary statistics 
+cattle_er_all <- all_occ %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Cattle_er, na.rm = TRUE),
+            median_er = median(Cattle_er, na.rm = TRUE),
+            min_er = min(Cattle_er,na.rm = TRUE),
+            max_er = max(Cattle_er,na.rm=T))
+cattle_er_all
+
+horse_er_all <- all_occ %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Horse_er, na.rm = TRUE),
+            median_er = median(Horse_er, na.rm = TRUE),
+            min_er = min(Horse_er,na.rm = TRUE),
+            max_er = max(Horse_er,na.rm=T))
+horse_er_all
+
+deer_er_all <- all_occ %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Deer_er, na.rm = TRUE),
+            median_er = median(Deer_er, na.rm = TRUE),
+            min_er = min(Deer_er,na.rm = TRUE),
+            max_er = max(Deer_er,na.rm=T))
+deer_er_all
+
+boar_er_all <- all_occ %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Boar_er, na.rm = TRUE),
+            median_er = median(Boar_er, na.rm = TRUE),
+            min_er = min(Boar_er,na.rm = TRUE),
+            max_er = max(Boar_er,na.rm=T))
+boar_er_all
+
+dog_er_all <- all_occ %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Dog_er, na.rm = TRUE),
+            median_er = median(Dog_er, na.rm = TRUE),
+            min_er = min(Dog_er,na.rm = TRUE),
+            max_er = max(Dog_er,na.rm=T))
+dog_er_all
+
+
+# Create factor variable for high and low abundance
+all_occ$Cattle <- ifelse(all_occ$Cattle_er > cattle_er_all$mean_er, "high", "low")
+all_occ$Horse<- ifelse(all_occ$Horse_er > horse_er_all$mean_er, "high", "low")
+
+## Get average sunrise and sunset times for summer and winter
+dates_summer <- seq(as.Date("2021-04-01"), as.Date("2021-09-30"), by="days") # create vector of dates for summer
+dates_summer<- getSunlightTimes(dates_summer,42.01683, -8.184782, keep= c("sunrise","sunset"),tz="Europe/London") # obtain sunrise and sunset times for each date
+
+mean.POSIXct(dates_summer$sunrise) # estimate mean sunrise time
+mean.POSIXct(dates_summer$sunset)  # estimate mean sunset time
+
+dates_winter <- seq(as.Date("2021-10-01"), as.Date("2022-03-31"), by="days")
+dates_winter <- getSunlightTimes(dates_winter,42.01683, -8.184782, keep= c("sunrise","sunset"),tz="Europe/Berlin")
+
+mean.POSIXct(dates_winter$sunrise)
+mean.POSIXct(dates_winter$sunset)
+
+## Create dataset for analysis
+
+species <- c("Bos taurus", "Equus caballus", "Capreolus capreolus", "Sus scrofa", "Capra pyrenaica", "Canis lupus familiaris")
+
+# Subset the dataset
+all_occ <- all_occ[all_occ$scientificName %in% species, ]
+
+# Get species specific counts
+table(all_occ$scientificName)
+
+# Summer data only
+summer <- subset(all_occ,Season=="summer") # create a subset of observations in summer
+
+table(summer$scientificName) # Get species counts
+
+# Get encounter rate statistics specifically for summer
+cattle_er_summer <- summer %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Cattle_er, na.rm = TRUE),
+            median_er = median(Cattle_er, na.rm = TRUE),
+            min_er = min(Cattle_er,na.rm = TRUE),
+            max_er = max(Cattle_er,na.rm=T))
+cattle_er_summer
+
+horse_er_summer <- summer %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Horse_er, na.rm = TRUE),
+            median_er = median(Horse_er, na.rm = TRUE),
+            min_er = min(Horse_er,na.rm = TRUE),
+            max_er = max(Horse_er,na.rm=T))
+horse_er_summer
+
+deer_er_summer <- summer %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Deer_er, na.rm = TRUE),
+            median_er = median(Deer_er, na.rm = TRUE),
+            min_er = min(Deer_er,na.rm = TRUE),
+            max_er = max(Deer_er,na.rm=T))
+deer_er_summer
+
+boar_er_summer <- summer %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Boar_er, na.rm = TRUE),
+            median_er = median(Boar_er, na.rm = TRUE),
+            min_er = min(Boar_er,na.rm = TRUE),
+            max_er = max(Boar_er,na.rm=T))
+boar_er_summer
+
+dog_er_summer <- summer %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Dog_er, na.rm = TRUE),
+            median_er = median(Dog_er, na.rm = TRUE),
+            min_er = min(Dog_er,na.rm = TRUE),
+            max_er = max(Dog_er,na.rm=T))
+dog_er_summer
+
+summer$Cattle <- ifelse(summer$Cattle_er > cattle_er_summer$mean_er, "high", "low")
+summer$Horse<- ifelse(summer$Horse_er > horse_er_summer$mean_er, "high", "low")
+
+# Winter data only 
+winter <- subset(all_occ,Season=="winter") # create a subset of observations in winter
+
+table(winter$scientificName) # Get species counts
+
+# Get encounter rate statistics specifically for winter
+cattle_er_winter <- winter %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Cattle_er, na.rm = TRUE),
+            median_er = median(Cattle_er, na.rm = TRUE),
+            min_er = min(Cattle_er,na.rm = TRUE),
+            max_er = max(Cattle_er,na.rm=T))
+
+cattle_er_winter
+
+horse_er_winter <- winter %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Horse_er, na.rm = TRUE),
+            median_er = median(Horse_er, na.rm = TRUE),
+            min_er = min(Horse_er,na.rm = TRUE),
+            max_er = max(Horse_er,na.rm=T))
+
+horse_er_winter
+
+deer_er_winter <- winter %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Deer_er, na.rm = TRUE),
+            median_er = median(Deer_er, na.rm = TRUE),
+            min_er = min(Deer_er,na.rm = TRUE),
+            max_er = max(Deer_er,na.rm=T))
+deer_er_winter
+
+boar_er_winter <- winter %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Boar_er, na.rm = TRUE),
+            median_er = median(Boar_er, na.rm = TRUE),
+            min_er = min(Boar_er,na.rm = TRUE),
+            max_er = max(Boar_er,na.rm=T))
+boar_er_winter
+
+dog_er_winter <- winter %>%
+  distinct(locationID, .keep_all = TRUE) %>%
+  summarise(mean_er = mean(Dog_er, na.rm = TRUE),
+            median_er = median(Dog_er, na.rm = TRUE),
+            min_er = min(Dog_er,na.rm = TRUE),
+            max_er = max(Dog_er,na.rm=T))
+dog_er_winter
+
+winter$Cattle <- ifelse(winter$Cattle_er > cattle_er_winter$mean_er, "high", "low")
+winter$Horse<- ifelse(winter$Horse_er > horse_er_winter$mean_er, "high", "low")
+
+```
+
+## Define function to estimate diurnal and nocturnal activity levels (provided by M. Rowcliffe)
+
+```{r}
+# Function takes a fitted 24-hour activity model (fit) and a 2-element vector (range) giving the radian times between which to calculate the percentage of time spent active.
+
+partial.act <- function(fit, range){
+  pd <- head(fit@pdf[,2], -1) #extract prob densities and matching times (minus final overlapping value)
+  tt <- head(fit@pdf[,1], -1)
+  if(range[1]>range[2]){ #if range overlaps midnight...
+    tt[tt<range[2]] <- tt[tt<range[2]]+2*pi #increment lower times and second range value to make range increasing
+    range[2] <- range[2]+2*pi
+  }
+  i <- tt>range[1] & tt<range[2] #indicator, are times within the range?
+  sum(pd[i])*2*pi / (512 * (max(pd)*diff(range))) #return activity level; note fit has 512 pdf values, so the approx. area under the curve is sum(pd)*2*pi/512
+}
+```
+
+### Seasonal analysis per species
+
+## Cattle
+
+```{r}
+# Create subset of all deer observations in summer
+cattle_summer <- subset(summer, scientificName == "Bos taurus")
+
+# Fit activity function
+cattle_all_summer <- solartime(cattle_summer$eventStartTime, 42.01683, -8.184782, 0) # transform times to solar times using average anchoring approach (Vazquez et al. 2019)
+cattleallsummer <- fitact(cattle_all_summer$solar,sample="data",reps=100) # Fit kernel density function to estimate activity level
+cattle_summer_day<-partial.act(cattleallsummer, c(6+32/60, 20+36/60)*pi/12) # estimate diurnal activity level 
+cattle_summer_night<-partial.act(cattleallsummer, c(20+36/60,6+32/60)*pi/12) # estimate nocturnal activity level
+
+# Create subset of all cattle observations in winter
+cattle_winter <- subset(winter, scientificName == "Bos taurus")
+
+# Fit activity function
+cattle_all_winter <- solartime(cattle_winter$eventStartTime, 42.01683, -8.184782, 0)
+cattleallwinter <- fitact(cattle_all_winter$solar,sample="data",reps=100)
+cattle_winter_day<-partial.act(cattleallwinter, c(8+22/60, 18+44/60)*pi/12)
+cattle_winter_night<-partial.act(cattleallwinter, c(18+44/60,8+22/60)*pi/12)
+
+# Estimate overlap and difference in activity patterns
+cattle_winter_summer_Ckern <- compareCkern(cattleallsummer, cattleallwinter, reps = 100)
+cattle_winter_summer_Act <- compareAct(list(cattleallsummer, cattleallwinter))
+
+overlapPlot(cattle_all_summer$solar, cattle_all_winter$solar, type = "Dhat4",linet = c(1,1), linewidth = c(2, 2), linec = c("orangered2", "turquoise4"),main="A) Cattle", ylim=c(0,0.12), extend="azure2", cex.lab=1.5, cex.axis=1.3,cex.main=2)
+abline(v=c(6+32/60, 20+36/60), lty=3,lwd=2,col="orangered2")
+abline(v=c(8+22/60, 18+44/60), lty=3,lwd=2,col="turquoise4")
+legend("topleft", c("Summer","Winter"), lty=1, lwd=2,col=c("orangered2", "turquoise4"), bg="white", cex=1.5)
+legend("topright",
+       c(sprintf("Δ = %.2f", cattle_winter_summer_Ckern[["obs"]]),
+         sprintf("δ = %.2f", cattle_winter_summer_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+```
+
+## Dog
+
+```{r}
+# Create subset of all dog observations in summer
+dog_summer <- subset(summer, scientificName == "Canis lupus familiaris")
+
+dog_all_summer <- solartime(dog_summer$eventStartTime, 42.01683, -8.184782, 0) # transform times to solar times using average anchoring approach (Vazquez et al. 2019)
+dogallsummer <- fitact(dog_all_summer$solar,sample="data",reps=100) # Fit kernel density function to estimate activity level
+dog_summer_day<-partial.act(dogallsummer, c(6+32/60, 20+36/60)*pi/12) # estimate diurnal activity level 
+dog_summer_night<-partial.act(dogallsummer, c(20+36/60,6+32/60)*pi/12) # estimate nocturnal activity level 
+
+# Create subset of all dog observations in winter
+dog_winter <- subset(winter, scientificName == "Canis lupus familiaris")
+
+dog_all_winter <- solartime(dog_winter$eventStartTime, 42.01683, -8.184782, 0)
+dogallwinter <- fitact(dog_all_winter$solar,sample="data",reps=100)
+dog_winter_day<-partial.act(dogallwinter, c(8+22/60, 18+44/60)*pi/12)
+dog_winter_night<-partial.act(dogallwinter, c(18+44/60,8+22/60)*pi/12)
+
+# Estimate overlap and difference in activity patterns
+dog_winter_summer_Ckern <- compareCkern(dogallsummer, dogallwinter, reps = 100)
+dog_winter_summer_Act <- compareAct(list(dogallsummer, dogallwinter)) 
+
+
+overlapPlot(dog_all_summer$solar, dog_all_winter$solar, type = "Dhat4",linet = c(1,1), linewidth = c(2, 2), linec = c("orangered2", "turquoise4"),main="Dog", ylim=c(0,0.12), extend="azure2", cex.lab=1.5, cex.axis=1.3,cex.main=2)
+abline(v=c(6+32/60, 20+36/60), lty=3,lwd=2,col="orangered2")
+abline(v=c(8+22/60, 18+44/60), lty=3,lwd=2,col="turquoise4")
+legend("topleft", c("Summer","Winter"), lty=1, lwd=2,col=c("orangered2", "turquoise4"), bg="white", cex=1.5)
+legend("topright",
+       c(sprintf("Δ = %.2f", dog_winter_summer_Ckern[["obs"]]),
+         sprintf("δ = %.2f", dog_winter_summer_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+
+```
+
+## Horse 
+
+```{r}
+# Create subset of all deer observations in summer
+horse_summer <- subset(summer, scientificName == "Equus caballus")
+
+horse_all_summer <- solartime(horse_summer$eventStartTime, 42.01683, -8.184782, 0) # transform times to solar times using average anchoring approach (Vazquez et al. 2019)
+horseallsummer <- fitact(horse_all_summer$solar,sample="data",reps=100) # Fit kernel density function to estimate activity level
+horse_summer_day<-partial.act(horseallsummer, c(6+32/60, 20+36/60)*pi/12) # estimate diurnal activity level
+horse_summer_night<-partial.act(horseallsummer, c(20+36/60,6+32/60)*pi/12) # estimate nocturnal activity level 
+
+# Create subset of all horse observations in winter
+horse_winter <- subset(winter, scientificName == "Equus caballus")
+
+horse_all_winter <- solartime(horse_winter$eventStartTime, 42.01683, -8.184782, 0)
+horseallwinter <- fitact(horse_all_winter$solar,sample="data",reps=100)
+horse_winter_day<-partial.act(horseallwinter, c(8+22/60, 18+44/60)*pi/12)
+horse_winter_night<-partial.act(horseallwinter, c(18+44/60,8+22/60)*pi/12)
+
+# Estimate overlap and difference in activity patterns
+horse_winter_summer_Ckern <- compareCkern(horseallsummer, horseallwinter, reps = 100)
+horse_winter_summer_Act <- compareAct(list(horseallsummer, horseallwinter)) 
+
+overlapPlot(horse_all_summer$solar, horse_all_winter$solar, type = "Dhat4",linet = c(1,1), linewidth = c(2, 2), linec = c("orangered2", "turquoise4"),main="B) Horse", ylim=c(0,0.12), extend="azure2", cex.lab=1.5, cex.axis=1.3,cex.main=2)
+abline(v=c(6+32/60, 20+36/60), lty=3,lwd=2,col="orangered2")
+abline(v=c(8+22/60, 18+44/60), lty=3,lwd=2,col="turquoise4")
+legend("topleft", c("Summer","Winter"), lty=1, lwd=2,col=c("orangered2", "turquoise4"), bg="white", cex=1.5)
+legend("topright",
+       c(sprintf("Δ = %.2f", horse_winter_summer_Ckern[["obs"]]),
+         sprintf("δ = %.2f", horse_winter_summer_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+
+```
+
+## Roe deer 
+
+```{r}
+# Create subset of all deer observations in summer
+deer_summer <- subset(summer, scientificName == "Capreolus capreolus")
+
+deer_all_summer <- solartime(deer_summer$eventStartTime, 42.01683, -8.184782, 0) # transform times to solar times using average anchoring approach (Vazquez et al. 2019)
+deerallsummer <- fitact(deer_all_summer$solar,sample="data",reps=100) # Fit kernel density function to estimate activity level
+deer_summer_day<-partial.act(deerallsummer, c(6+32/60, 20+36/60)*pi/12) # estimate diurnal activity level 
+deer_summer_night<-partial.act(deerallsummer, c(20+36/60,6+32/60)*pi/12) # estimate nocturnal activity level 
+
+# Create subset of all deer observations in winter
+deer_winter <- subset(winter, scientificName == "Capreolus capreolus")
+
+deer_all_winter <- solartime(deer_winter$eventStartTime, 42.01683, -8.184782, 0)
+deerallwinter <- fitact(deer_all_winter$solar,sample="data",reps=100)
+deer_winter_day<-partial.act(deerallwinter, c(8+22/60, 18+44/60)*pi/12)
+deer_winter_night<-partial.act(deerallwinter, c(18+44/60,8+22/60)*pi/12)
+
+# Estimate overlap and difference in activity patterns
+deer_winter_summer_Ckern <- compareCkern(deerallsummer, deerallwinter, reps = 100)
+deer_winter_summer_Act <- compareAct(list(deerallsummer, deerallwinter)) 
+
+overlapPlot(deer_all_summer$solar, deer_all_winter$solar, type = "Dhat4",linet = c(1,1), linewidth = c(2, 2), linec = c("orangered2", "turquoise4"),main="C) Roe deer", ylim=c(0,0.12), extend="azure2", cex.lab=1.5, cex.axis=1.3,cex.main=2)
+abline(v=c(6+32/60, 20+36/60), lty=3,lwd=2,col="orangered2")
+abline(v=c(8+22/60, 18+44/60), lty=3,lwd=2,col="turquoise4")
+legend("topleft", c("Summer","Winter"), lty=1, lwd=2,col=c("orangered2", "turquoise4"), bg="white", cex=1.5)
+legend("topright",
+       c(sprintf("Δ = %.2f", deer_winter_summer_Ckern[["obs"]]),
+         sprintf("δ = %.2f", deer_winter_summer_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+```
+
+## Wild boar 
+
+```{r}
+# Create subset of all deer observations in summer
+boar_summer <- subset(summer, scientificName == "Sus scrofa")
+
+boar_all_summer <- solartime(boar_summer$eventStartTime, 42.01683, -8.184782, 0) # transform times to solar times using average anchoring approach (Vazquez et al. 2019)
+boarallsummer <- fitact(boar_all_summer$solar,sample="data",reps=100) # Fit kernel density function to estimate activity level
+boar_summer_day<-partial.act(boarallsummer, c(6+32/60, 20+36/60)*pi/12) # estimate diurnal activity level
+boar_summer_night<-partial.act(boarallsummer, c(20+36/60,6+32/60)*pi/12) # estimate nocturnal activity level
+
+# Create subset of all boar observations in winter
+boar_winter <- subset(winter, scientificName == "Sus scrofa")
+
+# Estimate overlap and difference in activity patterns
+boar_all_winter <- solartime(boar_winter$eventStartTime, 42.01683, -8.184782, 0)
+boarallwinter <- fitact(boar_all_winter$solar,sample="data",reps=100)
+boar_winter_day<-partial.act(boarallwinter, c(8+22/60, 18+44/60)*pi/12)
+boar_winter_night<-partial.act(boarallwinter, c(18+44/60,8+22/60)*pi/12)
+
+boar_winter_summer_Ckern <- compareCkern(boarallsummer, boarallwinter, reps = 100)
+boar_winter_summer_Act <- compareAct(list(boarallsummer, boarallwinter)) 
+
+overlapPlot(boar_all_summer$solar, boar_all_winter$solar, type = "Dhat4",linet = c(1,1), linewidth = c(2, 2), linec = c("orangered2", "turquoise4"),main="D) Wild boar", ylim=c(0,0.12), extend="azure2", cex.lab=1.5, cex.axis=1.3,cex.main=2)
+abline(v=c(6+32/60, 20+36/60), lty=3,lwd=2,col="orangered2")
+abline(v=c(8+22/60, 18+44/60), lty=3,lwd=2,col="turquoise4")
+legend("topleft", c("Summer","Winter"), lty=1, lwd=2,col=c("orangered2", "turquoise4"), bg="white", cex=1.5)
+legend("topright",
+       c(sprintf("Δ = %.2f", boar_winter_summer_Ckern[["obs"]]),
+         sprintf("δ = %.2f", boar_winter_summer_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+```
+
+### Effects of cattle
+
+## Horse
+
+```{r}
+## Summer 
+
+# High cattle abundance
+horse_cattle_summer <- subset(horse_summer, Cattle == "high") # Create data subset
+horse_cattle_all_summer <- solartime(horse_cattle_summer$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+horsecattlesummer <- fitact(horse_cattle_all_summer$solar,sample="data",reps=100) # Fit activity function
+horse_cattle_summer_day<-partial.act(horsecattlesummer, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+horse_cattle_summer_night<-partial.act(horsecattlesummer, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Low cattle abundance
+horse_nocattle_summer  <- subset(horse_summer, Cattle == "low") # Create data subset
+horse_nocattle_all_summer  <- solartime(horse_nocattle_summer$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+horsenocattlesummer <- fitact(horse_nocattle_all_summer$solar,sample="data",reps=100) # Fit activity function
+horse_nocattle_summer_day<-partial.act(horsenocattlesummer, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+horse_nocattle_summer_night<-partial.act(horsenocattlesummer, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Estimate overlap and difference in activity patterns
+horse_cattle_summer_Ckern <- compareCkern(horsecattlesummer, horsenocattlesummer, reps = 100) # Overlap activity patterns
+horse_cattle_summer_Act<- compareAct(list(horsecattlesummer, horsenocattlesummer)) # Difference in activity levels
+
+# Plot
+overlap::densityPlot(cattle_all_summer$solar, n.grid=100, ylim=c(0,0.20),main="A) Horse - Summer",col="black",lwd=2, cex.lab=1.5, cex.axis=1.3,cex.main=2)
+overlap::densityPlot(dog_all_summer$solar, add=T, n.grid=100,col="black",lty=2,lwd=2)
+overlap::densityPlot(horse_cattle_all_summer $solar,  add=T, n.grid=100, lwd=2, col="purple3")
+overlap::densityPlot(horse_nocattle_all_summer $solar, add=T, n.grid=100,col="mediumseagreen",lwd=2)
+
+abline(v=c(6+32/60, 20+36/60), lty=3,lwd=2)
+legend("topleft", c("High cattle abundances","Low cattle abundances", "Cattle", "Shepherd dog"), lty=c(1,1,1,2), lwd=2, col=c("purple3","mediumseagreen", "black", "black"), bg="white", cex=1.5)
+legend("topright", 
+       c(sprintf("Δ = %.2f", horse_cattle_summer_Ckern[["obs"]]),
+         sprintf("δ = %.2f", horse_cattle_summer_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+
+# Estimate overlap with cattle
+horse_cattle_summer_direct_Ckern <- compareCkern(horsecattlesummer, cattleallsummer, reps = 100)
+horse_nocattle_summer_direct_Ckern <- compareCkern(horsenocattlesummer, cattleallsummer, reps = 100)
+
+## Winter
+
+# High cattle abundance
+horse_cattle_winter <- subset(horse_winter, Cattle == "high") # Create data subset
+horse_cattle_all_winter <- solartime(horse_cattle_winter$eventStartTime, 42.01683, -8.184782, 0)# Transform to solar time
+horsecattlewinter <- fitact(horse_cattle_all_winter$solar,sample="data",reps=100) # Fit activity function
+horse_cattle_winter_day<-partial.act(horsecattlewinter, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+horse_cattle_winter_night<-partial.act(horsecattlewinter, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Low cattle abundance
+horse_nocattle_winter  <- subset(horse_winter, Cattle == "low") # Create data subset
+horse_nocattle_all_winter  <- solartime(horse_nocattle_winter$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+horsenocattlewinter <- fitact(horse_nocattle_all_winter$solar,sample="data",reps=100) # Fit activity function
+horse_nocattle_winter_day<-partial.act(horsenocattlewinter, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+horse_nocattle_winter_night<-partial.act(horsenocattlewinter, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Estimate overlap and difference in activity patterns
+horse_cattle_winter_Ckern <- compareCkern(horsecattlewinter, horsenocattlewinter, reps = 100) # Overlap activity patterns
+horse_cattle_winter_Act <- compareAct(list(horsecattlewinter, horsenocattlewinter)) # Difference in activity levels
+
+# Plot
+overlap::densityPlot(cattle_all_winter$solar, n.grid=100, ylim=c(0,0.20),main="B) Horse - Winter",col="black",lwd=2, cex.lab=1.5, cex.axis=1.3,cex.main=2)
+overlap::densityPlot(dog_all_winter$solar, add=T, n.grid=100,col="black",lty=2,lwd=2)
+overlap::densityPlot(horse_cattle_all_winter $solar,  add=T, n.grid=100, lwd=2, col="purple3")
+overlap::densityPlot(horse_nocattle_all_winter $solar, add=T, n.grid=100,col="mediumseagreen",lwd=2)
+
+abline(v=c(8+22/60, 18+44/60), lty=3,lwd=2)
+legend("topleft", c("High cattle abundances","Low cattle abundances", "Cattle", "Shepherd dog"), lty=c(1,1,1,2), lwd=2, col=c("purple3","mediumseagreen", "black", "black"), bg="white", cex=1.5)
+legend("topright", 
+       c(sprintf("Δ = %.2f", horse_cattle_winter_Ckern[["obs"]]),
+         sprintf("δ = %.2f", horse_cattle_winter_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+
+# Estimate overlap with cattle
+horse_cattle_winter_direct_Ckern <- compareCkern(horsecattlewinter, cattleallwinter, reps = 100)
+horse_nocattle_winter_direct_Ckern <- compareCkern(horsenocattlewinter, cattleallwinter, reps = 100)
+
+```
+
+## Roe deer
+
+```{r}
+## Summer 
+
+# High cattle abundance
+deer_cattle_summer <- subset(deer_summer, Cattle == "high") # Create data subset
+deer_cattle_all_summer <- solartime(deer_cattle_summer$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+deercattlesummer <- fitact(deer_cattle_all_summer$solar,sample="data",reps=100) # Fit activity function
+deer_cattle_summer_day<-partial.act(deercattlesummer, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+deer_cattle_summer_night<-partial.act(deercattlesummer, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Low cattle abundance
+deer_nocattle_summer  <- subset(deer_summer, Cattle == "low") # Create data subset
+deer_nocattle_all_summer  <- solartime(deer_nocattle_summer$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+deernocattlesummer <- fitact(deer_nocattle_all_summer$solar,sample="data",reps=100) # Fit activity function
+deer_nocattle_summer_day<-partial.act(deernocattlesummer, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+deer_nocattle_summer_night<-partial.act(deernocattlesummer, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Estimate overlap and difference in activity patterns
+deer_cattle_summer_Ckern <- compareCkern(deercattlesummer, deernocattlesummer, reps = 100) # Overlap activity patterns
+deer_cattle_summer_Act<- compareAct(list(deercattlesummer, deernocattlesummer)) # Difference in activity levels 
+
+# Plot
+overlap::densityPlot(cattle_all_summer$solar, n.grid=100, ylim=c(0,0.20),main="A) Roe deer - Summer",col="black",lwd=2, cex.lab=1.5, cex.axis=1.3,cex.main=2)
+overlap::densityPlot(dog_all_summer$solar, add=T, n.grid=100,col="black",lty=2,lwd=2)
+overlap::densityPlot(deer_cattle_all_summer $solar,  add=T, n.grid=100, lwd=2, col="purple3")
+overlap::densityPlot(deer_nocattle_all_summer $solar, add=T, n.grid=100,col="mediumseagreen",lwd=2)
+
+abline(v=c(6+32/60, 20+36/60), lty=3,lwd=2)
+legend("topleft", c("High cattle abundances","Low cattle abundances", "Cattle", "Shepherd dog"), lty=c(1,1,1,2), lwd=2, col=c("purple3","mediumseagreen", "black", "black"), bg="white", cex=1.5)
+legend("topright", 
+       c(sprintf("Δ = %.2f", deer_cattle_summer_Ckern[["obs"]]),
+         sprintf("δ = %.2f", deer_cattle_summer_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+
+# Estimate overlap with cattle
+deer_cattle_summer_direct_Ckern <- compareCkern(deercattlesummer, cattleallsummer, reps = 100)
+deer_nocattle_summer_direct_Ckern <- compareCkern(deernocattlesummer, cattleallsummer, reps = 100)
+
+## Winter 
+
+# High cattle abundance
+deer_cattle_winter <- subset(deer_winter, Cattle == "high") # Create data subset
+deer_cattle_all_winter <- solartime(deer_cattle_winter$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+deercattlewinter <- fitact(deer_cattle_all_winter$solar,sample="data",reps=100) # Fit activity function
+deer_cattle_winter_day<-partial.act(deercattlewinter, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+deer_cattle_winter_night<-partial.act(deercattlewinter, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Low cattle abundance
+deer_nocattle_winter  <- subset(deer_winter, Cattle == "low") # Create data subset
+deer_nocattle_all_winter  <- solartime(deer_nocattle_winter$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+deernocattlewinter <- fitact(deer_nocattle_all_winter$solar,sample="data",reps=100) # Fit activity function
+deer_nocattle_winter_day<-partial.act(deernocattlewinter, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+deer_nocattle_winter_night<-partial.act(deernocattlewinter, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Estimate overlap and difference in activity patterns
+deer_cattle_winter_Ckern <- compareCkern(deercattlewinter, deernocattlewinter, reps = 100) # Overlap activity patterns
+deer_cattle_winter_Act <- compareAct(list(deercattlewinter, deernocattlewinter)) # Difference in activity levels 
+
+# Plot
+overlap::densityPlot(cattle_all_winter$solar, n.grid=100, ylim=c(0,0.20),main="B) Roe deer - Winter",col="black",lwd=2, cex.lab=1.5, cex.axis=1.3,cex.main=2)
+overlap::densityPlot(dog_all_winter$solar, add=T, n.grid=100,col="black",lty=2,lwd=2)
+overlap::densityPlot(deer_cattle_all_winter $solar,  add=T, n.grid=100, lwd=2, col="purple3")
+overlap::densityPlot(deer_nocattle_all_winter $solar, add=T, n.grid=100,col="mediumseagreen",lwd=2)
+
+abline(v=c(8+22/60, 18+44/60), lty=3,lwd=2)
+legend("topleft", c("High cattle abundances","Low cattle abundances", "Cattle", "Shepherd dog"), lty=c(1,1,1,2), lwd=2, col=c("purple3","mediumseagreen", "black", "black"), bg="white", cex=1.5)
+legend("topright", 
+       c(sprintf("Δ = %.2f", deer_cattle_winter_Ckern[["obs"]]),
+         sprintf("δ = %.2f", deer_cattle_winter_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+
+# Estimate overlap with cattle
+deer_cattle_winter_direct_Ckern <- compareCkern(deercattlewinter, cattleallwinter, reps = 100)
+deer_nocattle_winter_direct_Ckern <- compareCkern(deernocattlewinter, cattleallwinter, reps = 100)
+```
+
+## Wild boar
+
+```{r}
+## Summer
+
+# High cattle abundance
+boar_cattle_summer <- subset(boar_summer, Cattle == "high") # Create data subset
+boar_cattle_all_summer <- solartime(boar_cattle_summer$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+boarcattlesummer <- fitact(boar_cattle_all_summer$solar,sample="data",reps=100) # Fit activity function
+boar_cattle_summer_day<-partial.act(boarcattlesummer, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+boar_cattle_summer_night<-partial.act(boarcattlesummer, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Low cattle abundance
+boar_nocattle_summer  <- subset(boar_summer, Cattle == "low") # Create data subset
+boar_nocattle_all_summer  <- solartime(boar_nocattle_summer$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+boarnocattlesummer <- fitact(boar_nocattle_all_summer$solar,sample="data",reps=100) # Fit activity function
+boar_nocattle_summer_day<-partial.act(boarnocattlesummer, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+boar_nocattle_summer_night<-partial.act(boarnocattlesummer, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Estimate overlap and difference in activity patterns
+boar_cattle_summer_Ckern <- compareCkern(boarcattlesummer, boarnocattlesummer, reps = 100) # Overlap activity patterns
+boar_cattle_summer_Act<- compareAct(list(boarcattlesummer, boarnocattlesummer)) # Difference in activity levels 
+
+# Plot
+overlap::densityPlot(cattle_all_summer$solar, n.grid=100, ylim=c(0,0.20),main="C) Wild boar - Summer",col="black",lwd=2, cex.lab=1.5, cex.axis=1.3,cex.main=2)
+overlap::densityPlot(dog_all_summer$solar, add=T, n.grid=100,col="black",lty=2,lwd=2)
+overlap::densityPlot(boar_cattle_all_summer $solar,  add=T, n.grid=100, lwd=2, col="purple3")
+overlap::densityPlot(boar_nocattle_all_summer $solar, add=T, n.grid=100,col="mediumseagreen",lwd=2)
+
+abline(v=c(6+32/60, 20+36/60), lty=3,lwd=2)
+legend("topleft", c("High cattle abundances","Low cattle abundances", "Cattle", "Shepherd dog"), lty=c(1,1,1,2), lwd=2, col=c("purple3","mediumseagreen", "black", "black"), bg="white", cex=1.5)
+legend("topright", 
+       c(sprintf("Δ = %.2f", boar_cattle_summer_Ckern[["obs"]]),
+         sprintf("δ = %.2f", boar_cattle_summer_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+
+# Estimate overlap with cattle
+boar_cattle_summer_direct_Ckern <- compareCkern(boarcattlesummer, cattleallsummer, reps = 100)
+boar_nocattle_summer_direct_Ckern <- compareCkern(boarnocattlesummer, cattleallsummer, reps = 100)
+
+
+## Winter 
+
+# High cattle abundance
+boar_cattle_winter <- subset(boar_winter, Cattle == "high") # Create data subset
+boar_cattle_all_winter <- solartime(boar_cattle_winter$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+boarcattlewinter <- fitact(boar_cattle_all_winter$solar,sample="data",reps=100) # Fit activity function
+boar_cattle_winter_day<-partial.act(boarcattlewinter, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+boar_cattle_winter_night<-partial.act(boarcattlewinter, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Low cattle abundance
+boar_nocattle_winter  <- subset(boar_winter, Cattle == "low") # Create data subset
+boar_nocattle_all_winter  <- solartime(boar_nocattle_winter$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+boarnocattlewinter <- fitact(boar_nocattle_all_winter$solar,sample="data",reps=100) # Fit activity function
+boar_nocattle_winter_day<-partial.act(boarnocattlewinter, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+boar_nocattle_winter_night<-partial.act(boarnocattlewinter, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Estimate overlap and difference in activity patterns
+boar_cattle_winter_Ckern <- compareCkern(boarcattlewinter, boarnocattlewinter, reps = 100) # Overlap activity patterns
+boar_cattle_winter_Act <- compareAct(list(boarcattlewinter, boarnocattlewinter)) # Difference in activity levels 
+
+# Plot
+overlap::densityPlot(cattle_all_winter$solar, n.grid=100, ylim=c(0,0.20),main="D) Wild boar - Winter",col="black",lwd=2, cex.lab=1.5, cex.axis=1.3,cex.main=2)
+overlap::densityPlot(dog_all_winter$solar, add=T, n.grid=100,col="black",lty=2,lwd=2)
+overlap::densityPlot(boar_cattle_all_winter $solar,  add=T, n.grid=100, lwd=2, col="purple3")
+overlap::densityPlot(boar_nocattle_all_winter $solar, add=T, n.grid=100,col="mediumseagreen",lwd=2)
+
+abline(v=c(8+22/60, 18+44/60), lty=3,lwd=2)
+legend("topleft", c("High cattle abundances","Low cattle abundances", "Cattle", "Shepherd dog"), lty=c(1,1,1,2), lwd=2, col=c("purple3","mediumseagreen", "black", "black"), bg="white", cex=1.5)
+legend("topright", 
+       c(sprintf("Δ = %.2f", boar_cattle_winter_Ckern[["obs"]]),
+         sprintf("δ = %.2f", boar_cattle_winter_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+
+# Estimate overlap with cattle
+boar_cattle_winter_direct_Ckern <- compareCkern(boarcattlewinter, cattleallwinter, reps = 100)
+boar_nocattle_winter_direct_Ckern <- compareCkern(boarnocattlewinter, cattleallwinter, reps = 100)
+```
+
+### Effects of horses
+
+## Roe deer
+
+```{r}
+## Summer 
+
+# High horse abundance
+deer_horse_summer <- subset(deer_summer, Horse == "high") # Create data subset
+deer_horse_all_summer <- solartime(deer_horse_summer$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+deerhorsesummer <- fitact(deer_horse_all_summer$solar,sample="data",reps=100) # Fit activity function
+deer_horse_summer_day<-partial.act(deerhorsesummer, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+deer_horse_summer_night<-partial.act(deerhorsesummer, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Low horse abundance
+deer_nohorse_summer  <- subset(deer_summer, Horse == "low") # Create data subset
+deer_nohorse_all_summer  <- solartime(deer_nohorse_summer$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+deernohorsesummer <- fitact(deer_nohorse_all_summer$solar,sample="data",reps=100) # Fit activity function
+deer_nohorse_summer_day<-partial.act(deernohorsesummer, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+deer_nohorse_summer_night<-partial.act(deernohorsesummer, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Estimate overlap and difference in activity patterns
+deer_horse_summer_Ckern <- compareCkern(deerhorsesummer, deernohorsesummer, reps = 100) # Overlap activity patterns
+deer_horse_summer_Act<- compareAct(list(deerhorsesummer, deernohorsesummer)) # Difference in activity levels 
+
+# Plot
+overlap::densityPlot(horse_all_summer$solar, n.grid=100, ylim=c(0,0.14),main="A) Roe deer - Summer",col="black",lwd=2, cex.lab=1.5, cex.axis=1.3,cex.main=2)
+overlap::densityPlot(deer_horse_all_summer $solar,  add=T, n.grid=100, lwd=2, col="violetred3")
+overlap::densityPlot(deer_nohorse_all_summer $solar, add=T, n.grid=100,col="limegreen",lwd=2)
+
+abline(v=c(6+32/60, 20+36/60), lty=3,lwd=2)
+legend("topleft", c("High horse abundances","Low horse abundances", "Horse"), lty=c(1,1,1), lwd=2, col=c("violetred3", "limegreen", "black", "black"), bg="white", cex=1.5)
+legend("topright",
+       c(sprintf("Δ = %.2f", deer_horse_summer_Ckern[["obs"]]),
+         sprintf("δ = %.2f", deer_horse_summer_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+
+# Estimate overlap with horse
+deer_horse_summer_direct_Ckern <- compareCkern(deerhorsesummer, horseallsummer, reps = 100)
+deer_nohorse_summer_direct_Ckern <- compareCkern(deernohorsesummer, horseallsummer, reps = 100)
+
+
+## Winter 
+
+# High horse abundance
+deer_horse_winter <- subset(deer_winter, Horse == "high") # Create data subset
+deer_horse_all_winter <- solartime(deer_horse_winter$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+deerhorsewinter <- fitact(deer_horse_all_winter$solar,sample="data",reps=100) # Fit activity function
+deer_horse_winter_day<-partial.act(deerhorsewinter, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+deer_horse_winter_night<-partial.act(deerhorsewinter, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Low horse abundance
+deer_nohorse_winter  <- subset(deer_winter, Horse == "low") # Create data subset
+deer_nohorse_all_winter  <- solartime(deer_nohorse_winter$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+deernohorsewinter <- fitact(deer_nohorse_all_winter$solar,sample="data",reps=100) # Fit activity function
+deer_nohorse_winter_day<-partial.act(deernohorsewinter, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+deer_nohorse_winter_night<-partial.act(deernohorsewinter, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Estimate overlap and difference in activity patterns
+deer_horse_winter_Ckern <- compareCkern(deerhorsewinter, deernohorsewinter, reps = 100) # Overlap activity patterns
+deer_horse_winter_Act <- compareAct(list(deerhorsewinter, deernohorsewinter)) # Difference in activity levels 
+
+# Plot
+overlap::densityPlot(horse_all_winter$solar, n.grid=100, ylim=c(0,0.14),main="B) Roe deer - Winter",col="black",lwd=2, cex.lab=1.5, cex.axis=1.3,cex.main=2)
+overlap::densityPlot(deer_horse_all_winter $solar,  add=T, n.grid=100, lwd=2, col="violetred3")
+overlap::densityPlot(deer_nohorse_all_winter $solar, add=T, n.grid=100,col="limegreen",lwd=2)
+
+abline(v=c(8+22/60, 18+44/60), lty=3,lwd=2)
+legend("topleft", c("High horse abundances","Low horse abundances", "Horse"), lty=c(1,1,1), lwd=2, col=c("violetred3", "limegreen", "black", "black"), bg="white", cex=1.5)
+legend("topright",
+       c(sprintf("Δ = %.2f", deer_horse_winter_Ckern[["obs"]]),
+         sprintf("δ = %.2f", deer_horse_winter_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+
+# Estimate overlap with horse
+deer_horse_winter_direct_Ckern <- compareCkern(deerhorsewinter, horseallwinter, reps = 100)
+deer_nohorse_winter_direct_Ckern <- compareCkern(deernohorsewinter, horseallwinter, reps = 100)
+
+```
+
+## Wild boar
+
+```{r}
+## Summer
+
+# High horse abundance
+boar_horse_summer <- subset(boar_summer, Horse == "high") # Create data subset
+boar_horse_all_summer <- solartime(boar_horse_summer$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+boarhorsesummer <- fitact(boar_horse_all_summer$solar,sample="data",reps=100) # Fit activity function
+boar_horse_summer_day<-partial.act(boarhorsesummer, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+boar_horse_summer_night<-partial.act(boarhorsesummer, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Low horse abundance
+boar_nohorse_summer  <- subset(boar_summer, Horse == "low") # Create data subset
+boar_nohorse_all_summer  <- solartime(boar_nohorse_summer$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+boarnohorsesummer <- fitact(boar_nohorse_all_summer$solar,sample="data",reps=100) # Fit activity function
+boar_nohorse_summer_day<-partial.act(boarnohorsesummer, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+boar_nohorse_summer_night<-partial.act(boarnohorsesummer, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Estimate overlap and difference in activity patterns
+boar_horse_summer_Ckern <- compareCkern(boarhorsesummer, boarnohorsesummer, reps = 100) # Overlap activity patterns
+boar_horse_summer_Act<- compareAct(list(boarhorsesummer, boarnohorsesummer)) # Difference in activity levels 
+
+# Plot
+overlap::densityPlot(horse_all_summer$solar, n.grid=100, ylim=c(0,0.14),main="C) Wild boar - Summer",col="black",lwd=2, cex.lab=1.5, cex.axis=1.3,cex.main=2)
+overlap::densityPlot(boar_horse_all_summer $solar,  add=T, n.grid=100, lwd=2, col="violetred3")
+overlap::densityPlot(boar_nohorse_all_summer $solar, add=T, n.grid=100,col="limegreen",lwd=2)
+
+abline(v=c(6+32/60, 20+36/60), lty=3,lwd=2)
+legend("topleft", c("High horse abundances","Low horse abundances", "Horse"), lty=c(1,1,1), lwd=2, col=c("violetred3", "limegreen", "black", "black"), bg="white", cex=1.5)
+legend("topright",
+       c(sprintf("Δ = %.2f", boar_horse_summer_Ckern[["obs"]]),
+         sprintf("δ = %.2f", boar_horse_summer_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+
+# Estimate overlap with horse
+boar_horse_summer_direct_Ckern <- compareCkern(boarhorsesummer, horseallsummer, reps = 100)
+boar_nohorse_summer_direct_Ckern <- compareCkern(boarnohorsesummer, horseallsummer, reps = 100)
+
+
+## Winter 
+
+# High horse abundance
+boar_horse_winter <- subset(boar_winter, Horse == "high") # Create data subset
+boar_horse_all_winter <- solartime(boar_horse_winter$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+boarhorsewinter <- fitact(boar_horse_all_winter$solar,sample="data",reps=100) # Fit activity function
+boar_horse_winter_day<-partial.act(boarhorsewinter, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+boar_horse_winter_night<-partial.act(boarhorsewinter, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Low horse abundance
+boar_nohorse_winter  <- subset(boar_winter, Horse == "low") # Create data subset
+boar_nohorse_all_winter  <- solartime(boar_nohorse_winter$eventStartTime, 42.01683, -8.184782, 0) # Transform to solar time
+boarnohorsewinter <- fitact(boar_nohorse_all_winter$solar,sample="data",reps=100) # Fit activity function
+boar_nohorse_winter_day<-partial.act(boarnohorsewinter, c(6+32/60, 20+36/60)*pi/12) # Calculate diurnal activity level
+boar_nohorse_winter_night<-partial.act(boarnohorsewinter, c(20+36/60,6+32/60)*pi/12) # Calculate nocturnal activity level
+
+# Estimate overlap and difference in activity patterns
+boar_horse_winter_Ckern <- compareCkern(boarhorsewinter, boarnohorsewinter, reps = 100) # Overlap activity patterns
+boar_horse_winter_Act <- compareAct(list(boarhorsewinter, boarnohorsewinter)) # Difference in activity levels 
+
+# Plot
+overlap::densityPlot(horse_all_winter$solar, n.grid=100, ylim=c(0,0.18),main="D) Wild boar - Winter",col="black",lwd=2, cex.lab=1.5, cex.axis=1.3,cex.main=2)
+overlap::densityPlot(boar_horse_all_winter $solar,  add=T, n.grid=100, lwd=2, col="violetred3")
+overlap::densityPlot(boar_nohorse_all_winter $solar, add=T, n.grid=100,col="limegreen",lwd=2)
+
+abline(v=c(8+22/60, 18+44/60), lty=3,lwd=2)
+legend("topleft", c("High horse abundances","Low horse abundances", "Horse"), lty=c(1,1,1), lwd=2, col=c("violetred3", "limegreen", "black", "black"), bg="white", cex=1.5)
+legend("topright",
+       c(sprintf("Δ = %.2f", boar_horse_winter_Ckern[["obs"]]),
+         sprintf("δ = %.2f", boar_horse_winter_Act[, "Difference"])),
+       bg = "white", cex=1.5)
+
+# Estimate overlap with horse
+boar_horse_winter_direct_Ckern <- compareCkern(boarhorsewinter, horseallwinter, reps = 100)
+boar_nohorse_winter_direct_Ckern <- compareCkern
+
+```
+
+### Generalized Linear Mixed Models (GLMM) - Spatiotemporal effect of livestock
+
+## Load data
+
+```{r}
+
+setwd("C:/Users/az66lozy/Nextcloud2/Bachelorthesis_Melissa/Publication/Data")
+
+glmm_data <- read.csv("GLMM_dataset.csv",header=T,sep=";")
+glmm_data$locationID <- factor(glmm_data$locationID)
+glmm_data$scientificName<- factor(glmm_data$scientificName)
+glmm_data$Season <- factor(glmm_data$Season)
+
+
+# Adjust core activity times based on summer and winter activity pattern 
+glmm_data <- glmm_data %>%
+  mutate(CattleActivity = case_when(
+    Season == "summer" & Hour >= 7 & Hour <= 22 ~ 1,
+    Season == "summer" & (Hour < 7 | Hour > 22) ~ 0,
+    Season == "winter" & Hour >= 9 & Hour <= 20 ~ 1,
+    Season == "winter" & (Hour < 9 | Hour > 20) ~ 0,
+    TRUE ~ NA_real_  # fallback in case something doesn't match
+  ))
+
+glmm_data <- glmm_data %>%
+  mutate(HorseActivity = case_when(
+    Season == "summer" & Hour >= 6 & Hour <= 21 ~ 1,
+    Season == "summer" & (Hour < 6 | Hour > 21) ~ 0,
+    Season == "winter" & Hour >= 8 & Hour <= 22 ~ 1,
+    Season == "winter" & (Hour < 8 | Hour > 22) ~ 0,
+    TRUE ~ NA_real_  # fallback in case something doesn't match
+  ))
+
+glmm_data$CattleActivity <- factor(glmm_data$CattleActivity)
+glmm_data$HorseActivity <- factor(glmm_data$HorseActivity)
+
+
+# Get season specific encounter rates for cattle and horse from summer and winter dataset
+summer_er<- summer %>%
+  distinct(locationID, Season, Cattle, Horse)
+
+winter_er <- winter %>%
+  distinct(locationID, Season, Cattle, Horse)
+
+seasonal_er<- bind_rows(summer_er, winter_er)
+
+# Join with glmm_data to get correct seasonal Cattle and Horse values
+glmm_data_updated <- merge(glmm_data,seasonal_er, by =c("locationID","Season"), all.x =T) 
+
+```
+
+## Roe deer - Cattle
+
+```{r}
+glmm_deer <- subset(glmm_data_updated,scientificName== "Capreolus capreolus")
+hist(cbind(glmm_deer$present,glmm_deer$absent)) # Verteilung der Daten 
+
+# fit model with glmer
+glmm_deer_cattle <- glmer(cbind(present,absent) ~ Cattle * CattleActivity * Season + (1|locationID),
+                     data = glmm_deer, family = binomial()) #package lme4
+glmm_deer_cattle
+
+# calculate estimated marginal means
+em_interaction_deer_cattle <- emmeans(glmm_deer_cattle, ~ Cattle * CattleActivity * Season)
+
+# pairwise contrasts 
+pairwise_contrasts_deer_cattle <- contrast(em_interaction_deer_cattle, method = "pairwise")
+print(pairwise_contrasts_deer_cattle)
+
+# Simple Effects for Cattle by CattleActivity and Season
+simple_effects_abundance_deer_cattle <- contrast(em_interaction_deer_cattle, method = "pairwise", by = c("CattleActivity","Season"))
+print(simple_effects_abundance_deer_cattle)
+
+# Simple Effects for CattleActivity by Cattle and Season
+simple_effects_activity_deer_cattle <- contrast(em_interaction_deer_cattle, method = "pairwise", by = c("Cattle","Season"))
+print(simple_effects_activity_deer_cattle)
+
+# Convert EMMs to a data frame for plotting
+em_interaction_deer_cattle_df <- as.data.frame(em_interaction_deer_cattle)
+
+em_interaction_deer_cattle_df$Cattle = factor(em_interaction_deer_cattle_df$Cattle, levels = c("low", "high"))
+
+# Plot the estimated marginal means 
+
+labels <- c("Summer","Winter")
+names(labels) <- c("summer", "winter")
+
+ggplot(em_interaction_deer_cattle_df, aes(x = Cattle, y = emmean, color = CattleActivity, group = CattleActivity)) +  
+  geom_point(position = position_dodge(0.2), size = 4) +
+  scale_x_discrete(labels = c("Low", "High")) + 
+  scale_color_manual(values = c("mediumseagreen","purple3")) + 
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0.5, position = position_dodge(0.2),size=1) + 
+  geom_line(position = position_dodge(0.2), size=1) +     
+  facet_wrap(~Season, labeller = labeller(Season = labels)) +   
+  labs(x = "Cattle Abundance", y = "Probability of Roe deer Activity",  
+       color = "Cattle Activity", 
+       title = "Roe deer - Cattle") +  
+  theme_bw(base_size = 14) +
+  theme(title = element_text(size = 18, face = "bold"),
+        legend.title = element_text(size = 14, face = "bold"), 
+        legend.text = element_text(size = 14), 
+        axis.title = element_text(size = 14,face = "bold"),
+        axis.text = element_text(size = 14),
+        strip.text.x = element_text(size = 16))
+
+Anova(glmm_deer_cattle)
+
+simulationOutput_deer_cattle <- simulateResiduals(fittedModel = glmm_deer_cattle, plot = F) 
+plot(simulationOutput_deer_cattle)
+```
+
+## Roe deer - Horse
+
+```{r}
+glmm_deer_horse <- glmer(cbind(present,absent) ~ Horse * HorseActivity * Season + (1|locationID),
+                          data = glmm_deer, family = binomial()) 
+
+glmm_deer_horse
+
+# calculate estimated marginal means
+em_interaction_deer_horse <- emmeans(glmm_deer_horse, ~ Horse * HorseActivity * Season)
+
+# pairwise contrasts 
+pairwise_contrasts_deer_horse <- contrast(em_interaction_deer_horse, method = "pairwise")
+print(pairwise_contrasts_deer_horse)
+
+# Simple Effects for horse by horseActivity and Season
+simple_effects_abundance_deer_horse <- contrast(em_interaction_deer_horse, method = "pairwise", by = c("HorseActivity","Season"))
+print(simple_effects_abundance_deer_horse)
+
+# Simple Effects for horseActivity by horse and Season
+simple_effects_activity_deer_horse <- contrast(em_interaction_deer_horse, method = "pairwise", by = c("Horse","Season"))
+print(simple_effects_activity_deer_horse)
+
+# Convert EMMs to a data frame for plotting
+em_interaction_deer_horse_df <- as.data.frame(em_interaction_deer_horse)
+
+em_interaction_deer_horse_df$Horse = factor(em_interaction_deer_horse_df$Horse, levels = c("low", "high"))
+
+# Plot the estimated marginal means 
+
+ggplot(em_interaction_deer_horse_df, aes(x = Horse, y = emmean, color = HorseActivity, group = HorseActivity)) +  
+  geom_point(position = position_dodge(0.2), size = 4) +
+  scale_x_discrete(labels = c("Low", "High")) + 
+  scale_color_manual(values = c("limegreen","violetred3")) + 
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0.5, position = position_dodge(0.2),size=1) + 
+  geom_line(position = position_dodge(0.2), size=1) +     
+  facet_wrap(~Season, labeller = labeller(Season = labels)) +   
+  labs(x = "Horse Abundance", y = "Probability of Roe deer Activity",  
+       color = "Horse Activity", 
+       title = "Roe deer - Horse") +  
+  theme_bw(base_size = 14) +
+  theme(title = element_text(size = 18, face = "bold"),
+        legend.title = element_text(size = 14, face = "bold"), 
+        legend.text = element_text(size = 14), 
+        axis.title = element_text(size = 14,face = "bold"),
+        axis.text = element_text(size = 14),
+        strip.text.x = element_text(size = 16))
+
+Anova(glmm_deer_horse)
+
+simulationOutput_deer_horse <- simulateResiduals(fittedModel = glmm_deer_horse, plot = F)
+plot(simulationOutput_deer_horse)
+```
+
+### Wild boar - Cattle
+
+```{r}
+glmm_boar <- subset(glmm_data_updated,scientificName== "Sus scrofa")
+hist(cbind(glmm_boar$present,glmm_boar$absent))  
+
+# fit model with glmer
+glmm_boar_cattle <- glmer(cbind(present,absent) ~ Cattle * CattleActivity * Season + (1|locationID),
+                          data = glmm_boar, family = binomial()) #package lme4
+
+glmm_boar_cattle
+
+# calculate estimated marginal means
+em_interaction_boar_cattle <- emmeans(glmm_boar_cattle, ~ Cattle * CattleActivity * Season)
+
+# pairwise contrasts 
+pairwise_contrasts_boar_cattle <- contrast(em_interaction_boar_cattle, method = "pairwise")
+print(pairwise_contrasts_boar_cattle)
+
+# Simple Effects for Cattle by CattleActivity and Season
+simple_effects_abundance_boar_cattle <- contrast(em_interaction_boar_cattle, method = "pairwise", by = c("CattleActivity","Season"))
+print(simple_effects_abundance_boar_cattle)
+
+# Simple Effects for CattleActivity by Cattle and Season
+simple_effects_activity_boar_cattle <- contrast(em_interaction_boar_cattle, method = "pairwise", by = c("Cattle","Season"))
+print(simple_effects_activity_boar_cattle)
+
+# emmeans
+# Convert EMMs to a data frame for plotting
+em_interaction_boar_cattle_df <- as.data.frame(em_interaction_boar_cattle)
+
+em_interaction_boar_cattle_df$Cattle = factor(em_interaction_boar_cattle_df$Cattle, levels = c("low", "high"))
+
+
+# Plot the estimated marginal means 
+# verbesserter Plot 
+ggplot(em_interaction_boar_cattle_df, aes(x = Cattle, y = emmean, color = CattleActivity, group = CattleActivity)) +  
+  geom_point(position = position_dodge(0.2), size = 4) +
+  scale_x_discrete(labels = c("Low", "High")) + 
+  scale_color_manual(values = c("mediumseagreen","purple3")) + 
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0.5, position = position_dodge(0.2),size=1) + 
+  geom_line(position = position_dodge(0.2), size=1) +     
+  facet_wrap(~Season, labeller = labeller(Season = labels)) +   
+  labs(x = "Cattle Abundance", y = "Probability of Wild boar Activity",  
+       color = "Cattle Activity", 
+       title = "Wild boar - Cattle") +  
+  theme_bw(base_size = 14) +
+  theme(title = element_text(size = 18, face = "bold"),
+        legend.title = element_text(size = 14, face = "bold"), 
+        legend.text = element_text(size = 14), 
+        axis.title = element_text(size = 14,face = "bold"),
+        axis.text = element_text(size = 14),
+        strip.text.x = element_text(size = 16))
+
+Anova(glmm_boar_cattle)
+
+simulationOutput_boar_cattle <- simulateResiduals(fittedModel = glmm_boar_cattle, plot = F) #package DHARMa
+plot(simulationOutput_boar_cattle)
+```
+
+## Wild boar - Horse
+
+```{r}
+# fit model with glmer
+glmm_boar_horse <- glmer(cbind(present,absent) ~ Horse * HorseActivity * Season + (1|locationID),
+                          data = glmm_boar, family = binomial())
+glmm_boar_horse
+
+# calculate estimated marginal means
+em_interaction_boar_horse <- emmeans(glmm_boar_horse, ~ Horse * HorseActivity * Season)
+
+# pairwise contrasts 
+pairwise_contrasts_boar_horse <- contrast(em_interaction_boar_horse, method = "pairwise")
+print(pairwise_contrasts_boar_horse)
+
+# Simple Effects for Horse by HorseActivity and Season
+simple_effects_abundance_boar_horse <- contrast(em_interaction_boar_horse, method = "pairwise", by = c("HorseActivity","Season"))
+print(simple_effects_abundance_boar_horse)
+
+# Simple Effects for HorseActivity by Horse and Season
+simple_effects_activity_boar_horse <- contrast(em_interaction_boar_horse, method = "pairwise", by = c("Horse","Season"))
+print(simple_effects_activity_boar_horse)
+
+# Convert EMMs to a data frame for plotting
+em_interaction_boar_horse_df <- as.data.frame(em_interaction_boar_horse)
+
+em_interaction_boar_horse_df$Horse = factor(em_interaction_boar_horse_df$Horse, levels = c("low", "high"))
+
+
+# Plot the estimated marginal means 
+# verbesserter Plot 
+ggplot(em_interaction_boar_horse_df, aes(x = Horse, y = emmean, color = HorseActivity, group = HorseActivity)) +  
+  geom_point(position = position_dodge(0.2), size = 4) +
+  scale_x_discrete(labels = c("Low", "High")) + 
+  scale_color_manual(values = c("limegreen","violetred3")) + 
+  geom_errorbar(aes(ymin = asymp.LCL, ymax = asymp.UCL), width = 0.5, position = position_dodge(0.2),size=1) + 
+  geom_line(position = position_dodge(0.2), size=1) +     
+  facet_wrap(~Season, labeller = labeller(Season = labels)) +   
+  labs(x = "Horse Abundance", y = "Probability of Wild boar Activity",  
+       color = "Horse Activity", 
+       title = "Wild boar - Horse") +  
+  theme_bw(base_size = 14) +
+  theme(title = element_text(size = 18, face = "bold"),
+        legend.title = element_text(size = 14, face = "bold"), 
+        legend.text = element_text(size = 14), 
+        axis.title = element_text(size = 14,face = "bold"),
+        axis.text = element_text(size = 14),
+        strip.text.x = element_text(size = 16))
+
+Anova(glmm_boar_horse)
+
+simulationOutput_boar_horse <- simulateResiduals(fittedModel = glmm_boar_horse, plot = F)
+plot(simulationOutput_boar_horse)
+```
