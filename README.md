@@ -9,9 +9,9 @@ Traditional pastoralism has long shaped Southern European ecosystems, but widesp
 
 **Data structure:**
 
-- *Spatiotemporal_effects_livestock.Rmd* - R Notebook document for the entire analysis.
+- *Spatiotemporal_effects_livestock_R.Rmd* - R Notebook document for the entire analysis.
   - Code runs all models and produces all results and figures (except for maps, which were created using QGIS).
-- *Spatiotemporal_effects_livestock.html* - HTML document created from R *Spatiotemporal_effects_livestock.Rmd* 
+- *Spatiotemporal_effects_livestock_R.html* - HTML document created from R *Spatiotemporal_effects_livestock.Rmd* 
   
 - Datasets used for analysis:
 
