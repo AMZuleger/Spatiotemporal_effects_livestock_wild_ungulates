@@ -1,7 +1,8 @@
 # Spatiotemporal effects of livestock on wild ungulates
 Data and Code used for analysis of the manuscript ***From Summer Facilitation to Winter Avoidance: Seasonal Shifts in Livestock-Wild Ungulate Temporal Coexistence*** (DOI: 10.1002/ece3.73705)
 
-[insert DOI for Zenodo repository when available]
+Zenodo: https://doi.org/10.5281/zenodo.20209695
+Publication: https://doi.org/10.1002/ece3.73705
 
 **Abstract:**
 
